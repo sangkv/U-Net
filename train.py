@@ -1,7 +1,7 @@
 import torch
 from torch.utils.data import DataLoader
 from unet import UNet
-from dataset import EMDataset
+from dataset import EMDataset, EMPatchDataset
 from losses import bce_dice_loss
 from metrics import dice_score
 import numpy as np
@@ -26,7 +26,7 @@ def train():
     train_idx = indices[:split]
     val_idx = indices[split:]
 
-    train_ds = EMDataset(
+    train_ds = EMPatchDataset(
         TRAIN_VOLUME,
         TRAIN_LABEL,
         train_idx
