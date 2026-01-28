@@ -3,6 +3,7 @@ from torch.utils.data import Dataset
 import tifffile as tiff
 import numpy as np
 import random
+from augmentations import em_augmentation
 
 
 class EMDataset(Dataset):
@@ -43,7 +44,8 @@ class EMPatchDataset(Dataset):
         label_path,
         indices,
         patch_size=256,
-        patches_per_slice=10
+        patches_per_slice=10,
+        augment=True
     ):
         """
         volume: (Z, H, W)
@@ -55,6 +57,7 @@ class EMPatchDataset(Dataset):
         self.indices = indices
         self.patch_size = patch_size
         self.patches_per_slice = patches_per_slice
+        self.augment = augment
 
         self.H = self.volume.shape[1]
         self.W = self.volume.shape[2]
@@ -78,6 +81,9 @@ class EMPatchDataset(Dataset):
 
         img_patch = img[y:y+ps, x:x+ps]
         mask_patch = mask[y:y+ps, x:x+ps]
+
+        if self.augment:
+            img_patch, mask_patch = em_augmentation(img_patch, mask_patch)
 
         # normalize
         img_patch = img_patch.astype(np.float32)
