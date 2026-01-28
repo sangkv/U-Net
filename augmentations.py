@@ -79,8 +79,16 @@ def elastic_deform(img, mask, alpha=20, sigma=4):
 def em_augmentation(img, mask):
     img, mask = random_flip(img, mask)
     img, mask = random_rot90(img, mask)
-    img = random_intensity_shift(img)
-    img = random_gaussian_noise(img)
+
+    img = np.ascontiguousarray(img)
+    mask = np.ascontiguousarray(mask)
+
+    img = random_intensity_shift(img, max_shift=0.05)
+    img = random_gaussian_noise(img, sigma=0.01)
+
     if random.random() < 0.3:
-        img, mask = elastic_deform(img, mask, alpha=10, sigma=5)
+        alpha = random.uniform(3, 8)
+        sigma = random.uniform(6, 10)
+        img, mask = elastic_deform(img, mask, alpha=alpha, sigma=sigma)
+    
     return img, mask
