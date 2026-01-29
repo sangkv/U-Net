@@ -1,5 +1,6 @@
 import numpy as np
 import random
+from scipy.ndimage import gaussian_filter, map_coordinates
 
 
 def random_flip(img, mask):
@@ -18,23 +19,6 @@ def random_rot90(img, mask):
         img = np.rot90(img, k)
         mask = np.rot90(mask, k)
     return img, mask
-
-
-def random_intensity_shift(img, max_shift=0.1):
-    shift = random.uniform(-max_shift, max_shift)
-    img = img + shift
-    return img
-
-
-def random_gaussian_noise(img, sigma=0.02):
-    if random.random() < 0.5:
-        noise = np.random.normal(0, sigma, img.shape)
-        img = img + noise
-    return img
-
-
-import numpy as np
-from scipy.ndimage import gaussian_filter, map_coordinates
 
 
 def elastic_deform(img, mask, alpha=20, sigma=4):
@@ -82,9 +66,6 @@ def em_augmentation(img, mask):
 
     img = np.ascontiguousarray(img)
     mask = np.ascontiguousarray(mask)
-
-    img = random_intensity_shift(img, max_shift=0.05)
-    img = random_gaussian_noise(img, sigma=0.01)
 
     if random.random() < 0.3:
         alpha = random.uniform(3, 8)
