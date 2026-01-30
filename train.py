@@ -1,112 +1,153 @@
+import os
 import torch
-from torch.utils.data import DataLoader
-from unet import UNet
-from dataset import EMDataset, EMPatchDataset
-from losses import bce_dice_loss
-from metrics import dice_score
 import numpy as np
+from torch.utils.data import DataLoader
+from torch.optim import Adam
+
+from unet import UNet
+from dataset import EMDataset
+from config import Config
+from utils.augment import EMAugmentor
+from utils.losses import UnifiedLoss
+from utils.metrics import SegmentationMetrics
 
 
 def train():
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # ----------------------------------------------------------
+    # 1. Deterministic train / validation split
+    # ----------------------------------------------------------
+    train_idx, val_idx = Config.get_split_indices()
+    print(f"Train slices: {train_idx}")
+    print(f"Val slices:   {val_idx}")
 
-    # ----- split train / val -----
-    TRAIN_VOLUME = "data/train-volume.tif"
-    TRAIN_LABEL = "data/train-labels.tif"
-    full_dataset = EMDataset(
-        TRAIN_VOLUME,
-        TRAIN_LABEL
+    # ----------------------------------------------------------
+    # 2. Augmentor (EM-safe, config-driven)
+    # ----------------------------------------------------------
+    augmentor = EMAugmentor(
+        p_elastic=Config.AUGMENT_P_ELASTIC,
+        alpha_range=Config.AUGMENT_ALPHA_RANGE,
+        sigma_range=Config.AUGMENT_SIGMA_RANGE,
     )
 
-    n = len(full_dataset)
-    indices = np.random.permutation(n)
-    VAL_RATIO = 0.2
-    split = int(n * (1 - VAL_RATIO))
-
-    train_idx = indices[:split]
-    val_idx = indices[split:]
-
-    train_ds = EMPatchDataset(
-        TRAIN_VOLUME,
-        TRAIN_LABEL,
-        train_idx
+    # ----------------------------------------------------------
+    # 3. Datasets
+    # ----------------------------------------------------------
+    train_ds = EMDataset(
+        volume_path=Config.VOLUME_PATH,
+        label_path=Config.LABEL_PATH,
+        indices=train_idx,
+        patch_size=Config.PATCH_SIZE,
+        patches_per_slice=Config.PATCHES_PER_SLICE,
+        augmentor=augmentor,
     )
+
     val_ds = EMDataset(
-        TRAIN_VOLUME,
-        TRAIN_LABEL,
-        val_idx
+        volume_path=Config.VOLUME_PATH,
+        label_path=Config.LABEL_PATH,
+        indices=val_idx,
     )
 
-    BATCH_SIZE = 4
+    # ----------------------------------------------------------
+    # 4. DataLoaders
+    # ----------------------------------------------------------
     train_loader = DataLoader(
         train_ds,
-        batch_size=BATCH_SIZE,
+        batch_size=Config.BATCH_SIZE,
         shuffle=True,
-        num_workers=4,
-        pin_memory=True
+        num_workers=Config.NUM_WORKERS,
+        pin_memory=Config.PIN_MEMORY,
     )
+
     val_loader = DataLoader(
         val_ds,
-        batch_size=BATCH_SIZE,
-        shuffle=False
+        batch_size=1,
+        shuffle=False,
+        num_workers=Config.NUM_WORKERS,
+        pin_memory=Config.PIN_MEMORY,
     )
 
-    # ----- model -----
-    model = UNet(n_channels=1, n_classes=1, bilinear=True)
-    model.to(device)
+    # ----------------------------------------------------------
+    # 5. Model
+    # ----------------------------------------------------------
+    model = UNet(
+        n_channels=1,
+        n_classes=1,
+        bilinear=True,
+    ).to(Config.DEVICE)
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    # ----------------------------------------------------------
+    # 6. Loss & optimizer (semantic training)
+    # ----------------------------------------------------------
+    criterion = UnifiedLoss(
+        bce_weight=Config.LOSS_BCE_WEIGHT,
+        dice_weight=Config.LOSS_DICE_WEIGHT,
+        edge_weight=Config.LOSS_EDGE_WEIGHT,
+        pos_weight=Config.LOSS_POS_WEIGHT,
+    )
 
-    best_val_dice = 0.0
-    EPOCHS = 50
-    # ----- training loop -----
-    for epoch in range(EPOCHS):
+    optimizer = Adam(
+        model.parameters(),
+        lr=Config.LEARNING_RATE,
+    )
+
+    evaluator = SegmentationMetrics(device=Config.DEVICE)
+
+    # ----------------------------------------------------------
+    # 7. Training loop
+    # ----------------------------------------------------------
+    best_dice = 0.0
+    Config.CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
+
+    for epoch in range(1, Config.EPOCHS + 1):
         model.train()
-        train_loss = 0.0
-        
-        for img, mask in train_loader:
-            img = img.to(device)
-            mask = mask.to(device)
+        train_losses = []
 
-            optimizer.zero_grad(set_to_none=True)
+        for images, masks in train_loader:
+            images = images.to(Config.DEVICE, non_blocking=True)
+            masks = masks.to(Config.DEVICE, non_blocking=True)
 
-            pred = model(img)
-            loss = bce_dice_loss(pred, mask)
-            
+            optimizer.zero_grad()
+            logits = model(images)
+            loss = criterion(logits, masks)
             loss.backward()
             optimizer.step()
 
-            train_loss += loss.item()
-        
-        train_loss /= len(train_loader)
+            train_losses.append(loss.item())
 
-        # ----- validation -----
+        avg_train_loss = float(np.mean(train_losses))
+
+        # ------------------------------------------------------
+        # 8. Validation (pixel-level ONLY)
+        # ------------------------------------------------------
         model.eval()
-        val_dice = 0.0
+        val_dices = []
 
         with torch.no_grad():
-            for img, mask in val_loader:
-                img = img.to(device)
-                mask = mask.to(device)
+            for images, masks in val_loader:
+                images = images.to(Config.DEVICE, non_blocking=True)
+                masks = masks.to(Config.DEVICE, non_blocking=True)
 
-                pred = model(img)
-                val_dice += dice_score(pred, mask).item()
-            
-        val_dice /= len(val_loader)
+                logits = model(images)
+                metrics = evaluator.get_pixel_metrics(logits, masks)
+                val_dices.append(metrics["dice"])
+
+        avg_val_dice = float(np.mean(val_dices))
 
         print(
-            f"Epoch [{epoch+1}/{EPOCHS}] "
-            f"Train Loss: {train_loss:.4f} "
-            f"Val Dice: {val_dice:.4f}"
+            f"Epoch [{epoch:03d}/{Config.EPOCHS}] | "
+            f"Train Loss: {avg_train_loss:.4f} | "
+            f"Val Dice: {avg_val_dice:.4f}"
         )
 
-        # ----- save best -----
-        if val_dice > best_val_dice:
-            best_val_dice = val_dice
-            torch.save(model.state_dict(), "best_unet.pth")
-            print("  ✓ Saved best model")
+        # ------------------------------------------------------
+        # 9. Checkpoint
+        # ------------------------------------------------------
+        if avg_val_dice > best_dice:
+            best_dice = avg_val_dice
+            torch.save(model.state_dict(), Config.CHECKPOINT_PATH)
+            print(">>> Best model saved")
 
-    print("Training done. Best Val Dice:", best_val_dice)
+    print(f"\nTraining completed. Best Val Dice = {best_dice:.4f}")
 
 
 if __name__ == "__main__":
