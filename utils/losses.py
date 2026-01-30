@@ -2,64 +2,79 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+
 class UnifiedLoss(nn.Module):
     """
-    Hybrid Loss: BCE + Dice + Boundary Weighting.
-    Optimized for thin structures and general semantic segmentation.
+    Hybrid loss for binary segmentation combining:
+    - Weighted BCE (with optional boundary emphasis)
+    - Dice loss (per-image)
+
+    Designed for UNet-style architectures and thin-structure segmentation.
     """
+
     def __init__(self, bce_weight=1.0, dice_weight=1.0, edge_weight=2.0, pos_weight=1.0):
-        super(UnifiedLoss, self).__init__()
-        self.bce_weight = bce_weight
-        self.dice_weight = dice_weight
-        self.edge_weight = edge_weight
-        # Use register_buffer for automatic device management (CPU/GPU)
-        self.register_buffer('pos_weight', torch.tensor([pos_weight]))
+        super().__init__()
+        self.bce_weight = float(bce_weight)
+        self.dice_weight = float(dice_weight)
+        self.edge_weight = float(edge_weight)
+
+        self.register_buffer(
+            "pos_weight",
+            torch.tensor([pos_weight], dtype=torch.float32)
+        )
 
     def _get_edges(self, target):
         """
-        Morphological Gradient (Dilation - Erosion) to find boundaries.
+        Compute a morphological gradient (dilation - erosion)
+        to approximate object boundaries.
         """
-        # Kernel 3x3 is safe for both thin membranes and large object edges
         dilation = F.max_pool2d(target, kernel_size=3, stride=1, padding=1)
         erosion = -F.max_pool2d(-target, kernel_size=3, stride=1, padding=1)
-        return dilation - erosion
+        edge = dilation - erosion
+        return edge.clamp(0.0, 1.0)
 
     def dice_loss(self, pred_logits, target, smooth=1e-6):
         """
-        Per-image Dice Loss to ensure balanced contribution from each sample.
+        Per-image Dice loss.
+        Images with empty target masks are ignored.
         """
         probs = torch.sigmoid(pred_logits)
-        
-        # Calculate over spatial dimensions (H, W) per image in batch
-        # Safer than global flatten when batch has empty/small masks
-        dims = (2, 3) if probs.dim() == 4 else (1, 2)
+
+        dims = (2, 3)
         intersection = (probs * target).sum(dim=dims)
         cardinality = (probs + target).sum(dim=dims)
-        
-        dice_score = (2. * intersection + smooth) / (cardinality + smooth)
-        return (1. - dice_score).mean()
+
+        dice = (2.0 * intersection + smooth) / (cardinality + smooth)
+
+        valid = target.sum(dim=dims) > 0
+        if valid.any():
+            return (1.0 - dice[valid]).mean()
+        else:
+            return torch.zeros((), device=pred_logits.device)
 
     def forward(self, pred_logits, target):
-        # 1. Weighted BCE with pre-registered pos_weight
+        """
+        Args:
+            pred_logits (Tensor): shape (B, 1, H, W)
+            target (Tensor): shape (B, 1, H, W)
+        """
+        pos_weight = self.pos_weight.to(dtype=pred_logits.dtype)
+
         bce = F.binary_cross_entropy_with_logits(
-            pred_logits, target, 
-            pos_weight=self.pos_weight, 
-            reduction='none'
+            pred_logits,
+            target,
+            pos_weight=pos_weight,
+            reduction="none"
         )
-        
-        # 2. Boundary Weighting (Active if edge_weight > 1.0)
+
         if self.edge_weight > 1.0:
             with torch.no_grad():
                 edge_mask = self._get_edges(target)
-            # Create importance map: 1.0 everywhere, higher on edges
-            weight_map = 1.0 + (edge_mask * (self.edge_weight - 1.0))
-            weighted_bce = (bce * weight_map).mean()
+            weight_map = 1.0 + edge_mask * (self.edge_weight - 1.0)
+            bce = (bce * weight_map).mean()
         else:
-            weighted_bce = bce.mean()
-        
-        # 3. Dice Loss for regional overlap
-        dice = self.dice_loss(pred_logits, target)
-        
-        # Combined Loss
-        return (self.bce_weight * weighted_bce) + (self.dice_weight * dice)
+            bce = bce.mean()
 
+        dice = self.dice_loss(pred_logits, target)
+
+        return self.bce_weight * bce + self.dice_weight * dice
