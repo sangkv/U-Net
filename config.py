@@ -70,7 +70,7 @@ class Config:
     PATCHES_PER_SLICE = 10
 
     LEARNING_RATE = 1e-4
-    EPOCHS = 100
+    EPOCHS = 200
 
     # ------------------------------------------------------------------
     # Augmentation (EM-specific)
@@ -86,7 +86,7 @@ class Config:
     # ------------------------------------------------------------------
     # Edge weighting emphasizes thin membrane structures.
     LOSS_BCE_WEIGHT = 1.0
-    LOSS_DICE_WEIGHT = 1.0
+    LOSS_DICE_WEIGHT = 3.0
     LOSS_EDGE_WEIGHT = 5.0
     LOSS_POS_WEIGHT = 1.0
 
