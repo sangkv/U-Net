@@ -3,97 +3,91 @@ from torch.utils.data import Dataset
 import tifffile as tiff
 import numpy as np
 import random
-from augmentations import em_augmentation
 
 
 class EMDataset(Dataset):
-    def __init__(self, volume_path, label_path=None, indices=None):
-        self.volume = tiff.imread(volume_path)  # (Z, H, W)
-        self.label = None
-        if label_path is not None:
-            self.label = tiff.imread(label_path)
+    """
+    Dataset for Electron Microscopy (EM) image stacks.
 
-        if indices is None:
-            self.indices = list(range(self.volume.shape[0]))
-        else:
-            self.indices = indices
+    Supports:
+    - Slice-based sampling
+    - Random patch extraction
+    - Optional data augmentation
+    """
 
-    def __len__(self):
-        return len(self.indices)
-
-    def __getitem__(self, idx):
-        z = self.indices[idx]
-
-        img = self.volume[z].astype(np.float32)
-        img = (img - img.min()) / (img.max() - img.min() + 1e-8)
-        img = torch.from_numpy(img).unsqueeze(0)  # (1, H, W)
-
-        if self.label is None:
-            return img
-
-        mask = (self.label[z] > 0).astype(np.float32)
-        mask = torch.from_numpy(mask).unsqueeze(0)
-
-        return img, mask
-
-
-class EMPatchDataset(Dataset):
     def __init__(
         self,
         volume_path,
-        label_path,
-        indices,
-        patch_size=256,
-        patches_per_slice=10,
-        augment=True
+        label_path=None,
+        indices=None,
+        patch_size=None,
+        patches_per_slice=1,
+        augmentor=None
     ):
-        """
-        volume: (Z, H, W)
-        label:  (Z, H, W)
-        """
-        self.volume = tiff.imread(volume_path)
-        self.label = tiff.imread(label_path)
+        self.volume = tiff.imread(volume_path).astype(np.float32)
 
-        self.indices = indices
+        if self.volume.ndim != 3:
+            raise ValueError("Expected volume with shape (D, H, W).")
+
+        v_min = np.min(self.volume)
+        v_max = np.max(self.volume)
+        self.volume = (self.volume - v_min) / (v_max - v_min + 1e-8)
+
+        self.label = None
+        if label_path is not None:
+            self.label = tiff.imread(label_path).astype(np.float32)
+            if self.label.shape != self.volume.shape:
+                raise ValueError("Volume and label must have the same shape.")
+            self.label = (self.label > 127).astype(np.float32)
+
+        self.indices = indices if indices is not None else list(range(len(self.volume)))
         self.patch_size = patch_size
-        self.patches_per_slice = patches_per_slice
-        self.augment = augment
-
-        self.H = self.volume.shape[1]
-        self.W = self.volume.shape[2]
+        self.patches_per_slice = int(patches_per_slice)
+        self.augmentor = augmentor
 
     def __len__(self):
-        # Each slice generates multiple patches.
         return len(self.indices) * self.patches_per_slice
 
+    def _random_crop(self, img, mask):
+        h, w = img.shape
+        ps = self.patch_size
+
+        if ps > h or ps > w:
+            raise ValueError(
+                f"patch_size ({ps}) larger than image size ({h}, {w})."
+            )
+
+        y = random.randint(0, h - ps)
+        x = random.randint(0, w - ps)
+
+        img = img[y:y + ps, x:x + ps]
+        if mask is not None:
+            mask = mask[y:y + ps, x:x + ps]
+
+        return img, mask
+
     def __getitem__(self, idx):
-        # map idx → slice
         slice_idx = self.indices[idx // self.patches_per_slice]
 
         img = self.volume[slice_idx]
-        mask = self.label[slice_idx]
+        mask = self.label[slice_idx] if self.label is not None else None
 
-        ps = self.patch_size
+        # 1. Random patch extraction
+        if self.patch_size is not None:
+            img, mask = self._random_crop(img, mask)
 
-        # random crop
-        y = random.randint(0, self.H - ps)
-        x = random.randint(0, self.W - ps)
+        # 2. Data augmentation
+        if self.augmentor is not None and mask is not None:
+            img, mask = self.augmentor(img, mask)
 
-        img_patch = img[y:y+ps, x:x+ps]
-        mask_patch = mask[y:y+ps, x:x+ps]
+        # 3. Convert to tensors
+        img = np.ascontiguousarray(img)
+        img_tensor = torch.from_numpy(img).unsqueeze(0)
 
-        if self.augment:
-            img_patch, mask_patch = em_augmentation(img_patch, mask_patch)
+        if mask is not None:
+            mask = (mask > 0.5).astype(np.float32)
+            mask = np.ascontiguousarray(mask)
+            mask_tensor = torch.from_numpy(mask).unsqueeze(0)
+            return img_tensor, mask_tensor
 
-        # normalize
-        img_patch = img_patch.astype(np.float32)
-        img_patch = (img_patch - img_patch.min()) / (
-            img_patch.max() - img_patch.min() + 1e-8
-        )
-
-        img_patch = torch.from_numpy(img_patch).unsqueeze(0)
-
-        mask_patch = (mask_patch > 0).astype(np.float32)
-        mask_patch = torch.from_numpy(mask_patch).unsqueeze(0)
-
-        return img_patch, mask_patch
+        return img_tensor
