@@ -83,7 +83,7 @@ def train():
         dice_weight=Config.LOSS_DICE_WEIGHT,
         edge_weight=Config.LOSS_EDGE_WEIGHT,
         pos_weight=Config.LOSS_POS_WEIGHT,
-    )
+    ).to(Config.DEVICE)
 
     optimizer = Adam(
         model.parameters(),
