@@ -58,7 +58,7 @@ class UnifiedLoss(nn.Module):
             pred_logits (Tensor): shape (B, 1, H, W)
             target (Tensor): shape (B, 1, H, W)
         """
-        pos_weight = self.pos_weight.to(dtype=pred_logits.dtype)
+        pos_weight = self.pos_weight.to(device=pred_logits.device, dtype=pred_logits.dtype)
 
         bce = F.binary_cross_entropy_with_logits(
             pred_logits,
